@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Symbol finder with dependency chain tracking
+# Symbol finder - only shows paths leading to the symbol
 # Usage: ./find_symbol.sh <library_path> <symbol_pattern>
 
 set -euo pipefail
@@ -31,22 +31,19 @@ for cmd in nm ldd rg; do
   fi
 done
 
-# Associative arrays to track visited libraries and their paths
+# Associative arrays
 declare -A visited
-declare -A lib_full_paths
-declare -A symbol_found_in
+declare -A lib_symbols # stores "lib_path:status:symbol_name"
 
 # Function to resolve library path
 resolve_lib_path() {
   local lib="$1"
 
-  # If it's already a full path, use it
   if [[ "$lib" == /* ]]; then
     echo "$lib"
     return
   fi
 
-  # Try to find it using ldconfig
   local full_path=$(ldconfig -p 2>/dev/null | grep -E "^\s*$lib " | awk '{print $NF}' | head -1)
   if [ -n "$full_path" ]; then
     echo "$full_path"
@@ -67,7 +64,7 @@ get_symbol_status() {
   B) echo "BSS section (uninitialized global)" ;;
   b) echo "Local BSS (static uninitialized)" ;;
   W) echo "Weak symbol" ;;
-  w) echo "Local weak symbol" ;;
+  w) echo "Local weak object" ;;
   R) echo "Read-only data section" ;;
   r) echo "Local read-only data" ;;
   A) echo "Absolute symbol" ;;
@@ -78,68 +75,101 @@ get_symbol_status() {
   esac
 }
 
-# Function to search symbols in a library
-search_symbols() {
+# Function to check if library contains symbol
+check_library_for_symbol() {
   local lib_path="$1"
-  local indent="$2"
 
   if [ ! -f "$lib_path" ]; then
-    return
+    return 1
   fi
 
   # Search for symbols using nm and ripgrep
   local symbols=$(nm -D "$lib_path" 2>/dev/null | rg "$SYMBOL_PATTERN" || true)
 
   if [ -n "$symbols" ]; then
-    while IFS= read -r line; do
-      # Parse nm output (format: address status symbol)
-      local status=$(echo "$line" | awk '{print $2}')
-      local symbol=$(echo "$line" | awk '{print $3}')
-      local status_desc=$(get_symbol_status "$status")
-
-      if [ "$status" = "U" ]; then
-        echo -e "${indent}  ${YELLOW}↳ Symbol: $symbol${NC}"
-        echo -e "${indent}    Status: ${RED}$status${NC} - $status_desc"
-      else
-        echo -e "${indent}  ${GREEN}↳ Symbol: $symbol${NC}"
-        echo -e "${indent}    Status: ${GREEN}$status${NC} - $status_desc"
-        symbol_found_in["$lib_path"]=1
-      fi
-    done <<<"$symbols"
+    # Store all matching symbols for this library
+    lib_symbols["$lib_path"]="$symbols"
+    return 0
   fi
+  return 1
 }
 
-# Recursive function to traverse dependencies
-traverse_deps() {
+# Recursive function to find paths to symbol
+find_symbol_paths() {
   local lib_path="$1"
-  local chain="$2"
-  local indent="$3"
+  local chain_array=("${@:2}") # Rest of args are the chain
 
   # Skip if already visited
   if [[ ${visited["$lib_path"]+isset} ]]; then
-    echo -e "${indent}${CYAN}[Already processed: $(basename "$lib_path")]${NC}"
-    return
+    return 1
   fi
 
   visited["$lib_path"]=1
 
-  # Print current library in chain
-  echo -e "${indent}${BLUE}→ $(basename "$lib_path")${NC} ($lib_path)"
+  local found=0
+  local has_symbol=0
 
-  # Search for symbols in current library
-  search_symbols "$lib_path" "$indent"
+  # Check if this library has the symbol
+  if check_library_for_symbol "$lib_path"; then
+    has_symbol=1
+    found=1
+  fi
 
-  # Get dependencies
-  local deps=$(ldd "$lib_path" 2>/dev/null | grep -E '^\s*lib' | awk '{print $1, $3}' || true)
+  # Get dependencies and check them recursively
+  local deps=$(ldd "$lib_path" 2>/dev/null | grep -E '^\s*lib' | awk '{print $3}' || true)
 
   if [ -n "$deps" ]; then
-    while IFS=' ' read -r dep_name dep_path; do
-      if [ -n "$dep_path" ] && [ "$dep_path" != "not" ]; then
-        local new_chain="${chain} > ${dep_name}"
-        traverse_deps "$dep_path" "$new_chain" "${indent}  "
+    while IFS= read -r dep_path; do
+      if [ -n "$dep_path" ] && [ "$dep_path" != "not" ] && [ -f "$dep_path" ]; then
+        local new_chain=("${chain_array[@]}" "$dep_path")
+        if find_symbol_paths "$dep_path" "${new_chain[@]}"; then
+          found=1
+        fi
       fi
     done <<<"$deps"
   fi
+
+  # If symbol was found in this branch, print the chain
+  if [ $found -eq 1 ] && [ $has_symbol -eq 1 ]; then
+    # Print the chain
+    echo ""
+    echo -e "${CYAN}Found in chain:${NC}"
+    for i in "${!chain_array[@]}"; do
+      local indent=""
+      for ((j = 0; j < i; j++)); do
+        indent="  $indent"
+      done
+
+      local lib="${chain_array[$i]}"
+      local basename=$(basename "$lib")
+
+      if [ "$lib" = "$lib_path" ]; then
+        # This is the library with the symbol
+        echo -e "${indent}${GREEN}→ $basename${NC}"
+
+        # Print symbol details
+        while IFS= read -r line; do
+          if [ -n "$line" ]; then
+            local status=$(echo "$line" | awk '{print $2}')
+            local symbol=$(echo "$line" | awk '{print $3}')
+            local status_desc=$(get_symbol_status "$status")
+
+            if [ "$status" = "U" ]; then
+              echo -e "${indent}  ${YELLOW}Symbol: $symbol${NC}"
+              echo -e "${indent}  ${RED}Status: $status${NC} - $status_desc"
+            else
+              echo -e "${indent}  ${GREEN}Symbol: $symbol${NC}"
+              echo -e "${indent}  ${GREEN}Status: $status${NC} - $status_desc"
+            fi
+          fi
+        done <<<"${lib_symbols[$lib_path]}"
+      else
+        echo -e "${indent}${BLUE}→ $basename${NC}"
+      fi
+    done
+  fi
+
+  return $found
 }
 
 # Main execution
@@ -149,7 +179,6 @@ echo -e "${CYAN}========================================${NC}"
 echo -e "Library: $LIBRARY"
 echo -e "Symbol Pattern: $SYMBOL_PATTERN"
 echo -e "${CYAN}========================================${NC}"
-echo ""
 
 # Resolve the main library path
 MAIN_LIB_PATH=$(resolve_lib_path "$LIBRARY")
@@ -159,9 +188,12 @@ if [ ! -f "$MAIN_LIB_PATH" ]; then
   exit 1
 fi
 
-# Start traversal
-echo -e "${GREEN}Dependency Tree:${NC}"
-traverse_deps "$MAIN_LIB_PATH" "$(basename "$MAIN_LIB_PATH")" ""
+# Start search
+if ! find_symbol_paths "$MAIN_LIB_PATH" "$MAIN_LIB_PATH"; then
+  echo ""
+  echo -e "${RED}Symbol pattern '$SYMBOL_PATTERN' not found in any dependencies${NC}"
+  exit 1
+fi
 
 # Summary
 echo ""
@@ -169,14 +201,28 @@ echo -e "${CYAN}========================================${NC}"
 echo -e "${CYAN}Summary${NC}"
 echo -e "${CYAN}========================================${NC}"
 
-if [ ${#symbol_found_in[@]} -gt 0 ]; then
-  echo -e "${GREEN}Symbol DEFINED in:${NC}"
-  for lib in "${!symbol_found_in[@]}"; do
-    echo -e "  ✓ $(basename "$lib") ($lib)"
-  done
-else
-  echo -e "${RED}Symbol not defined in any library (only undefined references found)${NC}"
-fi
+# Count defined vs undefined
+defined_count=0
+undefined_count=0
 
-echo ""
-echo -e "Total libraries scanned: ${#visited[@]}"
+for lib_path in "${!lib_symbols[@]}"; do
+  while IFS= read -r line; do
+    if [ -n "$line" ]; then
+      local status=$(echo "$line" | awk '{print $2}')
+      if [ "$status" = "U" ]; then
+        ((undefined_count++))
+      else
+        ((defined_count++))
+      fi
+    fi
+  done <<<"${lib_symbols[$lib_path]}"
+done
+
+echo -e "Symbol occurrences found:"
+if [ $defined_count -gt 0 ]; then
+  echo -e "  ${GREEN}✓ Defined: $defined_count${NC}"
+fi
+if [ $undefined_count -gt 0 ]; then
+  echo -e "  ${YELLOW}○ Undefined references: $undefined_count${NC}"
+fi
+echo -e "Libraries in chain: $(echo ${!lib_symbols[@]} | wc -w)"
