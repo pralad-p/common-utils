@@ -153,8 +153,17 @@ find_symbol_paths() {
         # Print symbol details
         while IFS= read -r line; do
           if [ -n "$line" ]; then
-            local status=$(echo "$line" | awk '{print $2}')
-            local symbol=$(echo "$line" | awk '{print $3}')
+            # Parse nm output - undefined symbols have no address
+            local first_field=$(echo "$line" | awk '{print $1}')
+            if [[ "$first_field" =~ ^[0-9a-fA-F]+$ ]]; then
+              # Has address - defined symbol
+              local status=$(echo "$line" | awk '{print $2}')
+              local symbol=$(echo "$line" | awk '{print $3}')
+            else
+              # No address - undefined symbol or other
+              local status=$(echo "$line" | awk '{print $1}')
+              local symbol=$(echo "$line" | awk '{print $2}')
+            fi
             local status_desc=$(get_symbol_status "$status")
 
             if [ "$status" = "U" ]; then
@@ -219,6 +228,15 @@ for lib_path in "${!lib_symbols[@]}"; do
   while IFS= read -r line; do
     if [ -n "$line" ]; then
       status=$(echo "$line" | awk '{print $2}')
+      # Parse nm output - undefined symbols have no address
+      first_field=$(echo "$line" | awk '{print $1}')
+      if [[ "$first_field" =~ ^[0-9a-fA-F]+$ ]]; then
+        # Has address - defined symbol
+        status=$(echo "$line" | awk '{print $2}')
+      else
+        # No address - undefined symbol or other
+        status=$(echo "$line" | awk '{print $1}')
+      fi
       if [ "$status" = "U" ]; then
         ((undefined_count++))
       else
