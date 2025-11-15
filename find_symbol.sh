@@ -33,7 +33,8 @@ done
 
 # Associative arrays
 declare -A visited
-declare -A lib_symbols # stores "lib_path:status:symbol_name"
+declare -A lib_symbols  # stores "lib_path:status:symbol_name"
+declare -A found_chains # stores successful chains
 
 # Function to resolve library path
 resolve_lib_path() {
@@ -113,6 +114,8 @@ find_symbol_paths() {
   if check_library_for_symbol "$lib_path"; then
     has_symbol=1
     found=1
+    # Mark this chain as successful
+    found_chains["$lib_path"]=1
   fi
 
   # Get dependencies and check them recursively
@@ -209,11 +212,13 @@ echo -e "${CYAN}========================================${NC}"
 # Count defined vs undefined
 defined_count=0
 undefined_count=0
+total_libs=0
 
 for lib_path in "${!lib_symbols[@]}"; do
+  ((total_libs++))
   while IFS= read -r line; do
     if [ -n "$line" ]; then
-      local status=$(echo "$line" | awk '{print $2}')
+      status=$(echo "$line" | awk '{print $2}')
       if [ "$status" = "U" ]; then
         ((undefined_count++))
       else
@@ -230,4 +235,11 @@ fi
 if [ $undefined_count -gt 0 ]; then
   echo -e "  ${YELLOW}○ Undefined references: $undefined_count${NC}"
 fi
-echo -e "Libraries in chain: $(echo ${!lib_symbols[@]} | wc -w)"
+echo -e "Libraries containing symbol: $total_libs"
+echo -e "Total libraries scanned: ${#visited[@]}"
+
+# Debug output to help diagnose empty summary
+if [ ${#lib_symbols[@]} -eq 0 ]; then
+  echo -e "${YELLOW}Debug: No symbols were stored in lib_symbols array${NC}"
+  echo -e "${YELLOW}This might indicate the symbol pattern didn't match anything${NC}"
+fi
