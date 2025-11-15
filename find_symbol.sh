@@ -224,7 +224,7 @@ undefined_count=0
 total_libs=0
 
 for lib_path in "${!lib_symbols[@]}"; do
-  ((total_libs++))
+  ((++total_libs))
   while IFS= read -r line; do
     if [ -n "$line" ]; then
       status=$(echo "$line" | awk '{print $2}')
@@ -238,9 +238,9 @@ for lib_path in "${!lib_symbols[@]}"; do
         status=$(echo "$line" | awk '{print $1}')
       fi
       if [ "$status" = "U" ]; then
-        ((undefined_count++))
+        ((++undefined_count))
       else
-        ((defined_count++))
+        ((++defined_count))
       fi
     fi
   done <<<"${lib_symbols[$lib_path]}"
